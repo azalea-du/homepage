@@ -42,18 +42,63 @@ def run_backtest(
     index = data.index
 
     for i, ts in enumerate(index):
-        price = float(data.loc[ts, "close"])  # execution at close for simplicity
+        bar = data.loc[ts]
+        open_price = float(bar.get("open", np.nan))
+        high = float(bar.get("high", np.nan))
+        low = float(bar.get("low", np.nan))
+        close = float(bar.get("close"))
         weight = float(weights.loc[ts]) if ts in weights.index else 0.0
 
         # Skip rebalance if price is invalid or non-positive
-        if not np.isfinite(price) or price <= 0:
+        if not np.isfinite(close) or close <= 0:
             equity_values.append(broker.equity(equity_price := data["close"].iloc[max(0, i-1)] if i > 0 else 0.0))
             continue
 
-        if i + 1 >= min_bars:  # allow signals only after enough history
-            broker.rebalance_to_target_weight(weight=weight, price=price)
+        # 1) Intrabar stop processing (if strategy provides stops)
+        stops = getattr(strategy, "stops", None)
+        if stops is not None:
+            position = broker.portfolio.get_or_create_position(symbol)
+            qty = position.quantity
+            avg_price = position.average_price
+            if qty != 0 and np.isfinite(avg_price) and avg_price > 0:
+                triggered_side = None  # "stop_loss" or "take_profit"
+                exit_price = None
 
-        equity_values.append(broker.equity(price))
+                if qty > 0:  # long
+                    if getattr(stops, "stop_loss_pct", None):
+                        stop_loss_price = avg_price * (1.0 - float(stops.stop_loss_pct))
+                        if np.isfinite(low) and low <= stop_loss_price:
+                            triggered_side = triggered_side or "stop_loss"
+                            exit_price = stop_loss_price
+                    if getattr(stops, "take_profit_pct", None):
+                        take_profit_price = avg_price * (1.0 + float(stops.take_profit_pct))
+                        if np.isfinite(high) and high >= take_profit_price:
+                            # if both fire, prefer stop_loss (more conservative) by only overwriting if not set
+                            if triggered_side is None:
+                                triggered_side = "take_profit"
+                                exit_price = take_profit_price
+                else:  # short
+                    if getattr(stops, "stop_loss_pct", None):
+                        stop_loss_price = avg_price * (1.0 + float(stops.stop_loss_pct))
+                        if np.isfinite(high) and high >= stop_loss_price:
+                            triggered_side = triggered_side or "stop_loss"
+                            exit_price = stop_loss_price
+                    if getattr(stops, "take_profit_pct", None):
+                        take_profit_price = avg_price * (1.0 - float(stops.take_profit_pct))
+                        if np.isfinite(low) and low <= take_profit_price:
+                            if triggered_side is None:
+                                triggered_side = "take_profit"
+                                exit_price = take_profit_price
+
+                if triggered_side is not None and exit_price is not None and exit_price > 0:
+                    # Flatten at the stop/take-profit level
+                    broker.close_position(price=float(exit_price))
+
+        # 2) Rebalance to target weight at close after stops
+        if i + 1 >= min_bars:  # allow signals only after enough history
+            broker.rebalance_to_target_weight(weight=weight, price=close)
+
+        equity_values.append(broker.equity(close))
 
     equity_curve = pd.Series(equity_values, index=index, name="equity")
     # Stats will be filled by metrics module later; provide minimal baseline

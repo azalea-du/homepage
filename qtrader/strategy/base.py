@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
@@ -34,6 +34,33 @@ class SmaCrossStrategy(Strategy):
 
         signal = (sma_short > sma_long).astype(int) - (sma_short < sma_long).astype(int)
         # Keep last non-NaN signal after enough history; fill NaN with 0
+        signal = signal.fillna(0.0)
+        signal.name = "weight"
+        return signal
+
+
+@dataclass
+class StopParams:
+    stop_loss_pct: float | None = None  # e.g., 0.05 for 5% below entry for longs
+    take_profit_pct: float | None = None  # e.g., 0.10 for 10% above entry for longs
+
+
+@dataclass
+class SmaCrossWithStopsStrategy(Strategy):
+    short_window: int = 20
+    long_window: int = 50
+    stops: StopParams = field(default_factory=StopParams)
+
+    def min_history_bars(self) -> int:
+        return max(self.short_window, self.long_window)
+
+    def generate_target_weights(self, data: pd.DataFrame) -> pd.Series:
+        """Same signals as `SmaCrossStrategy`; stops handled by engine intrabar."""
+        close = data["close"].astype(float)
+        sma_short = simple_moving_average(close, self.short_window)
+        sma_long = simple_moving_average(close, self.long_window)
+
+        signal = (sma_short > sma_long).astype(int) - (sma_short < sma_long).astype(int)
         signal = signal.fillna(0.0)
         signal.name = "weight"
         return signal

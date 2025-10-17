@@ -47,6 +47,22 @@ class PaperBroker:
         position.update_with_fill(fill)
         self.fills.append(fill)
 
+    def market_order(self, side: OrderSide, quantity: float, price: float) -> None:
+        """Execute a market order immediately at the provided reference price.
+
+        The broker will apply configured slippage and commission.
+        """
+        self._apply_trade(side=side, quantity=quantity, price=price)
+
+    def close_position(self, price: float) -> None:
+        """Flatten the current position at the provided reference price."""
+        position = self.portfolio.get_or_create_position(self.symbol)
+        current_shares = int(position.quantity)
+        if current_shares == 0:
+            return
+        side = OrderSide.SELL if current_shares > 0 else OrderSide.BUY
+        self._apply_trade(side=side, quantity=abs(current_shares), price=price)
+
     def rebalance_to_target_weight(self, weight: float, price: float) -> None:
         # Compute desired shares based on current equity and target weight
         last_prices: Dict[str, float] = {self.symbol: price}
