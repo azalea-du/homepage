@@ -8,6 +8,7 @@ import numpy as np
 
 from qtrader.broker.paper import PaperBroker
 from qtrader.strategy.base import Strategy
+from qtrader.risk.manager import RiskManager
 
 
 @dataclass
@@ -22,6 +23,7 @@ def run_backtest(
     strategy: Strategy,
     symbol: str = "TEST",
     initial_cash: float = 100_000.0,
+    risk_manager: RiskManager | None = None,
 ) -> BacktestResult:
     if data.empty:
         raise ValueError("data is empty")
@@ -51,6 +53,13 @@ def run_backtest(
             continue
 
         if i + 1 >= min_bars:  # allow signals only after enough history
+            if risk_manager is not None:
+                weight = risk_manager.adjust_weight(
+                    portfolio=broker.portfolio,
+                    symbol=symbol,
+                    price=price,
+                    requested_weight=weight,
+                )
             broker.rebalance_to_target_weight(weight=weight, price=price)
 
         equity_values.append(broker.equity(price))
