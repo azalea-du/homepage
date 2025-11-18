@@ -141,8 +141,10 @@ const lineRewards = [0, 100, 300, 500, 800];
 
 const boardCanvas = document.getElementById("board");
 const nextCanvas = document.getElementById("next");
+const holdCanvas = document.getElementById("hold");
 const boardCtx = boardCanvas.getContext("2d");
 const nextCtx = nextCanvas.getContext("2d");
+const holdCtx = holdCanvas ? holdCanvas.getContext("2d") : null;
 
 const scoreEl = document.getElementById("score");
 const linesEl = document.getElementById("lines");
@@ -152,6 +154,23 @@ const toggleBtn = document.getElementById("toggle-btn");
 
 boardCtx.imageSmoothingEnabled = false;
 nextCtx.imageSmoothingEnabled = false;
+if (holdCtx) {
+  holdCtx.imageSmoothingEnabled = false;
+}
+
+let audioCtx = null;
+const SOUND_PRESETS = {
+  move: { frequency: 320, duration: 0.07, type: "triangle", gain: 0.045 },
+  rotate: { frequency: 380, duration: 0.08, type: "triangle", gain: 0.05 },
+  softDrop: { frequency: 420, duration: 0.05, type: "square", gain: 0.035 },
+  hardDrop: { frequency: 520, duration: 0.12, type: "square", gain: 0.06 },
+  hold: { frequency: 260, duration: 0.09, type: "sine", gain: 0.04 },
+  lock: { frequency: 300, duration: 0.1, type: "triangle", gain: 0.05 },
+  line: { frequency: 640, duration: 0.18, type: "sawtooth", gain: 0.06 },
+  level: { frequency: 720, duration: 0.2, type: "triangle", gain: 0.05 },
+  start: { frequency: 500, duration: 0.2, type: "triangle", gain: 0.05 },
+  gameover: { frequency: 180, duration: 0.4, type: "sawtooth", gain: 0.05 },
+};
 
 const cellSize = Math.floor(boardCanvas.width / BOARD_COLS);
 
@@ -159,6 +178,8 @@ const state = {
   board: createMatrix(BOARD_COLS, BOARD_ROWS),
   piece: null,
   nextPiece: null,
+  holdKey: null,
+  canHold: true,
   bag: [],
   score: 0,
   lines: 0,
@@ -173,6 +194,67 @@ const state = {
 
 function createMatrix(width, height) {
   return Array.from({ length: height }, () => Array(width).fill(null));
+}
+
+function getSpawnPosition(matrix) {
+  const width = matrix[0].length;
+  return {
+    x: Math.floor((BOARD_COLS - width) / 2),
+    y: -1,
+  };
+}
+
+function createPiece(key) {
+  const blueprint = TETROMINOES[key];
+  const defaultMatrix = blueprint.rotations[0];
+  return {
+    key,
+    rotationIndex: 0,
+    matrix: defaultMatrix,
+    color: blueprint.color,
+    position: getSpawnPosition(defaultMatrix),
+  };
+}
+
+function resetPieceToSpawn(piece) {
+  if (!piece) return;
+  const blueprint = TETROMINOES[piece.key];
+  const defaultMatrix = blueprint.rotations[0];
+  piece.rotationIndex = 0;
+  piece.matrix = defaultMatrix;
+  piece.color = blueprint.color;
+  piece.position = getSpawnPosition(defaultMatrix);
+}
+
+function initAudio() {
+  if (typeof window === "undefined") return;
+  const AudioCtor = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtor) return;
+  if (!audioCtx) {
+    audioCtx = new AudioCtor();
+  }
+  if (audioCtx.state === "suspended") {
+    audioCtx.resume();
+  }
+}
+
+function playSound(name) {
+  if (typeof window === "undefined") return;
+  if (!audioCtx) return;
+  const preset = SOUND_PRESETS[name];
+  if (!preset) return;
+  const duration = preset.duration || 0.1;
+  const now = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const gainNode = audioCtx.createGain();
+  osc.type = preset.type || "sine";
+  osc.frequency.setValueAtTime(preset.frequency, now);
+  gainNode.gain.setValueAtTime(preset.gain ?? 0.04, now);
+  gainNode.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+  osc.connect(gainNode);
+  gainNode.connect(audioCtx.destination);
+  osc.start(now);
+  osc.stop(now + duration);
 }
 
 function shuffle(array) {
@@ -192,27 +274,24 @@ function takePiece() {
     refillBag();
   }
   const key = state.bag.pop();
-  const blueprint = TETROMINOES[key];
-  return {
-    key,
-    rotationIndex: 0,
-    matrix: blueprint.rotations[0],
-    color: blueprint.color,
-    position: { x: Math.floor(BOARD_COLS / 2) - 2, y: -1 },
-  };
+  return createPiece(key);
 }
 
 function spawnPiece() {
   state.piece = state.nextPiece || takePiece();
   state.nextPiece = takePiece();
-  state.piece.position = { x: Math.floor(BOARD_COLS / 2) - 2, y: -1 };
+  resetPieceToSpawn(state.piece);
+  state.canHold = true;
+  state.dropCounter = 0;
   if (collide(state.board, state.piece)) {
     return gameOver();
   }
   drawNext();
+  drawHold();
 }
 
 function startGame() {
+  initAudio();
   state.board = createMatrix(BOARD_COLS, BOARD_ROWS);
   state.score = 0;
   state.lines = 0;
@@ -220,6 +299,8 @@ function startGame() {
   state.dropInterval = BASE_DROP_INTERVAL;
   state.dropCounter = 0;
   state.lastTime = 0;
+  state.holdKey = null;
+  state.canHold = true;
   state.running = true;
   state.paused = false;
   if (state.animationId) {
@@ -232,6 +313,7 @@ function startGame() {
   updateStatus("running");
   toggleBtn.textContent = "Pause";
   setButtonPressed(true);
+  playSound("start");
   state.animationId = requestAnimationFrame(update);
 }
 
@@ -247,11 +329,13 @@ function pauseGame() {
 
 function resumeGame() {
   if (!state.running || !state.paused) return;
+  initAudio();
   state.paused = false;
   state.lastTime = performance.now();
   updateStatus("running");
   toggleBtn.textContent = "Pause";
   setButtonPressed(true);
+  playSound("start");
   state.animationId = requestAnimationFrame(update);
 }
 
@@ -263,6 +347,7 @@ function gameOver() {
   updateStatus("idle", "topped out");
   toggleBtn.textContent = "Restart";
   setButtonPressed(false);
+  playSound("gameover");
   draw();
 }
 
@@ -292,6 +377,8 @@ function hardDrop() {
     distance += 1;
   }
   state.score += distance * 2;
+  state.dropCounter = 0;
+  playSound("hardDrop");
   lockPiece();
 }
 
@@ -308,7 +395,7 @@ function movePiece(offsetX, offsetY) {
 }
 
 function rotatePiece(dir = 1) {
-  if (!state.piece) return;
+  if (!state.piece) return false;
   const blueprint = TETROMINOES[state.piece.key];
   const len = blueprint.rotations.length;
   const prevIndex = state.piece.rotationIndex;
@@ -323,13 +410,39 @@ function rotatePiece(dir = 1) {
   for (const offset of offsets) {
     state.piece.position.x = originalX + offset;
     if (!collide(state.board, state.piece)) {
-      return;
+      return true;
     }
   }
 
   state.piece.rotationIndex = prevIndex;
   state.piece.matrix = blueprint.rotations[prevIndex];
   state.piece.position.x = originalX;
+  return false;
+}
+
+function holdCurrentPiece() {
+  if (!state.piece || !state.canHold) return false;
+  state.canHold = false;
+  state.dropCounter = 0;
+  const currentKey = state.piece.key;
+  if (state.holdKey === null) {
+    state.holdKey = currentKey;
+    state.piece = state.nextPiece;
+    state.nextPiece = takePiece();
+    resetPieceToSpawn(state.piece);
+  } else {
+    const swapKey = state.holdKey;
+    state.holdKey = currentKey;
+    state.piece = createPiece(swapKey);
+  }
+  drawNext();
+  drawHold();
+  if (collide(state.board, state.piece)) {
+    gameOver();
+    return false;
+  }
+  playSound("hold");
+  return true;
 }
 
 function collide(board, piece) {
@@ -365,7 +478,10 @@ function lockPiece() {
   if (cleared > 0) {
     state.score += lineRewards[cleared] * state.level;
     state.lines += cleared;
+    playSound("line");
     updateLevel();
+  } else {
+    playSound("lock");
   }
   spawnPiece();
   updateStats();
@@ -394,6 +510,7 @@ function updateLevel() {
       BASE_DROP_INTERVAL - (level - 1) * 70
     );
     state.dropCounter = 0;
+    playSound("level");
   }
 }
 
@@ -466,40 +583,83 @@ function drawMatrix(ctx, matrix, offset, forcedColor) {
   });
 }
 
-function drawNext() {
-  nextCtx.clearRect(0, 0, nextCanvas.width, nextCanvas.height);
-  nextCtx.fillStyle = "#fff9fd";
-  nextCtx.fillRect(0, 0, nextCanvas.width, nextCanvas.height);
-  if (!state.nextPiece) return;
-  const matrix = state.nextPiece.matrix;
-  const cell = Math.floor(Math.min(nextCanvas.width, nextCanvas.height) / 5);
-  const startX = (nextCanvas.width - matrix[0].length * cell) / 2;
-  const startY = (nextCanvas.height - matrix.length * cell) / 2;
+function drawPreview(ctx, canvas, pieceKey) {
+  if (!ctx || !canvas) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#fff9fd";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (!pieceKey) return;
+  const blueprint = TETROMINOES[pieceKey];
+  const matrix = blueprint.rotations[0];
+  const cell = Math.floor(Math.min(canvas.width, canvas.height) / 5);
+  const startX = (canvas.width - matrix[0].length * cell) / 2;
+  const startY = (canvas.height - matrix.length * cell) / 2;
   matrix.forEach((row, y) => {
     row.forEach((value, x) => {
       if (!value) return;
-      nextCtx.fillStyle = state.nextPiece.color;
+      ctx.fillStyle = blueprint.color;
       const px = startX + x * cell;
       const py = startY + y * cell;
-      nextCtx.fillRect(px, py, cell, cell);
-      nextCtx.strokeStyle = "rgba(255, 255, 255, 0.65)";
-      nextCtx.lineWidth = 2;
-      nextCtx.strokeRect(px + 1, py + 1, cell - 2, cell - 2);
+      ctx.fillRect(px, py, cell, cell);
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.65)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(px + 1, py + 1, cell - 2, cell - 2);
     });
   });
+}
+
+function drawNext() {
+  const key = state.nextPiece ? state.nextPiece.key : null;
+  drawPreview(nextCtx, nextCanvas, key);
+}
+
+function drawHold() {
+  drawPreview(holdCtx, holdCanvas, state.holdKey);
 }
 
 function handleKeydown(event) {
   const { key } = event;
   if (key === "Enter" && !state.running) {
     event.preventDefault();
+    initAudio();
     startGame();
     return;
   }
 
+  const interactiveKeys = new Set([
+    "ArrowLeft",
+    "ArrowRight",
+    "ArrowDown",
+    "ArrowUp",
+    " ",
+    "Space",
+    "Shift",
+    "c",
+    "C",
+    "p",
+    "P",
+  ]);
+
+  if (interactiveKeys.has(key)) {
+    initAudio();
+  }
+
   if (!state.running) return;
 
-  if (["ArrowLeft", "ArrowRight", "ArrowDown", "ArrowUp", " ", "Space"].includes(key)) {
+  if (
+    [
+      "ArrowLeft",
+      "ArrowRight",
+      "ArrowDown",
+      "ArrowUp",
+      " ",
+      "Space",
+      "Shift",
+    ].includes(key)
+  ) {
+    event.preventDefault();
+  }
+  if (key === "c" || key === "C") {
     event.preventDefault();
   }
 
@@ -509,25 +669,44 @@ function handleKeydown(event) {
 
   switch (key) {
     case "ArrowLeft":
-      movePiece(-1, 0);
+      if (movePiece(-1, 0)) {
+        playSound("move");
+        draw();
+      }
       break;
     case "ArrowRight":
-      movePiece(1, 0);
+      if (movePiece(1, 0)) {
+        playSound("move");
+        draw();
+      }
       break;
     case "ArrowDown":
       if (movePiece(0, 1)) {
         state.score += 1;
         updateStats();
+        playSound("softDrop");
+        draw();
       }
       state.dropCounter = 0;
       break;
     case "ArrowUp":
-      rotatePiece();
+      if (rotatePiece()) {
+        playSound("rotate");
+        draw();
+      }
       break;
     case " ":
     case "Space":
       hardDrop();
       updateStats();
+      draw();
+      break;
+    case "Shift":
+    case "c":
+    case "C":
+      if (holdCurrentPiece()) {
+        draw();
+      }
       break;
     case "p":
     case "P":
@@ -544,6 +723,7 @@ function handleKeydown(event) {
 
 function setupUI() {
   toggleBtn.addEventListener("click", () => {
+    initAudio();
     if (!state.running) {
       startGame();
     } else if (state.paused) {
@@ -561,5 +741,7 @@ function setButtonPressed(active) {
 document.addEventListener("keydown", handleKeydown);
 setupUI();
 draw();
+drawNext();
+drawHold();
 updateStatus("idle");
 setButtonPressed(false);
